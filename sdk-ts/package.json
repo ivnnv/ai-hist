@@ -1,27 +1,47 @@
 {
   "name": "ai-hist",
   "version": "0.1.0",
-  "description": "TypeScript SDK for reading the ai-hist SQLite database (recent prompts, sessions, full-text search).",
+  "description": "TypeScript SDK for reading the ai-hist SQLite database (recent prompts, sessions, search).",
   "license": "MIT",
+  "private": false,
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
-    "src",
-    "README.md"
+    "README.md",
+    "package.json"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AgentWorkforce/ai-hist",
+    "directory": "sdk-ts"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "npm run build",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node --test dist/*.test.js",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "sql.js": "^1.13.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^22.18.0",
     "@types/sql.js": "^1.4.9",
-    "typescript": "^5.7.0"
+    "typescript": "^5.9.2"
   },
   "engines": {
     "node": ">=18"
