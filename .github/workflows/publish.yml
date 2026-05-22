@@ -309,7 +309,12 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add sdk-ts/package.json sdk-ts/CHANGELOG.md
+          git add sdk-ts/package.json
+          # CHANGELOG only exists once there's been at least one release with
+          # Unreleased content or a prior tag — skip silently on first publish.
+          if [ -f sdk-ts/CHANGELOG.md ]; then
+            git add sdk-ts/CHANGELOG.md
+          fi
           if git diff --cached --quiet; then
             echo "No version changes to commit."
           else
