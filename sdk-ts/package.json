@@ -1,7 +1,7 @@
 {
   "name": "ai-hist",
   "version": "0.2.0",
-  "description": "TypeScript SDK for browsing your Claude / Codex / Cursor history — reads the ai-hist SQLite DB when present, falls back to scanning the local JSONL files directly when not.",
+  "description": "TypeScript SDK for reading the ai-hist SQLite database (recent prompts, sessions, search).",
   "license": "MIT",
   "private": false,
   "type": "module",
