@@ -468,6 +468,40 @@ class TestCmdSearch:
         captured = capsys.readouterr()
         assert "agent-relay" in captured.out
 
+    def test_search_excludes_leading_dash_term(self, tmp_env, capsys):
+        seed_db(tmp_env, claude_lines=[
+            make_claude_entry("deploy agent relay", 1700000001000, "/proj"),
+            make_claude_entry("deploy dashboard", 1700000002000, "/proj"),
+        ])
+        capsys.readouterr()
+        args = SimpleNamespace(query=["deploy", "-relay"], source=None, project=None, limit=20)
+        ai_hist.cmd_search(args)
+        captured = capsys.readouterr()
+        assert "dashboard" in captured.out
+        assert "agent relay" not in captured.out
+
+    def test_search_only_excluded_term_returns_no_results(self, tmp_env, capsys):
+        seed_db(tmp_env, claude_lines=[
+            make_claude_entry("deploy agent relay", 1700000001000, "/proj"),
+        ])
+        capsys.readouterr()
+        args = SimpleNamespace(query=["-relay"], source=None, project=None, limit=20)
+        with pytest.raises(SystemExit) as exc_info:
+            ai_hist.cmd_search(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "No results." in captured.out
+
+    def test_search_quotes_embedded_quotes(self, tmp_env, capsys):
+        seed_db(tmp_env, claude_lines=[
+            make_claude_entry('fix foo"bar input', 1700000001000, "/proj"),
+        ])
+        capsys.readouterr()
+        args = SimpleNamespace(query=['foo"bar'], source=None, project=None, limit=20)
+        ai_hist.cmd_search(args)
+        captured = capsys.readouterr()
+        assert 'foo"bar' in captured.out
+
 
 class TestCmdRecent:
     def test_recent_default(self, tmp_env, capsys):
@@ -1676,6 +1710,43 @@ class TestCmdExport:
         assert len(rows) == 1
         assert rows[0][0] == "sqlite export"
 
+    def test_export_sqlite_overwrites_existing_file(self, tmp_env, tmp_path, capsys):
+        seed_db(tmp_env, claude_lines=[
+            make_claude_entry("current export", 1700000001000, "/proj", "s1"),
+        ])
+        out_file = str(tmp_path / "export.db")
+        stale = sqlite3.connect(out_file)
+        ai_hist.init_db(stale)
+        stale.execute(
+            "INSERT INTO history (source, session_id, project, prompt, prompt_hash, timestamp_ms) "
+            "VALUES ('claude', 'old', '/old', 'stale row', 'hash', 1)"
+        )
+        stale.commit()
+        stale.close()
+        capsys.readouterr()
+
+        args = SimpleNamespace(output=out_file, format="sqlite", source=None, project=None, since=None)
+        ai_hist.cmd_export(args)
+
+        conn = sqlite3.connect(out_file)
+        rows = conn.execute("SELECT prompt FROM history ORDER BY prompt").fetchall()
+        conn.close()
+        assert rows == [("current export",)]
+
+    def test_export_sqlite_refuses_active_db_path(self, tmp_env, capsys):
+        seed_db(tmp_env, claude_lines=[
+            make_claude_entry("do not overwrite active db", 1700000001000, "/proj", "s1"),
+        ])
+        capsys.readouterr()
+        args = SimpleNamespace(
+            output=str(tmp_env.db_path), format="sqlite", source=None, project=None, since=None
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            ai_hist.cmd_export(args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Refusing to export SQLite over the active AI_HIST_DB" in captured.err
+
     def test_export_filter_by_source(self, tmp_env, capsys):
         seed_db(tmp_env,
             claude_lines=[make_claude_entry("claude prompt", 1700000001000)],
@@ -1688,6 +1759,40 @@ class TestCmdExport:
         rows = [json.loads(l) for l in captured.out.strip().splitlines() if l]
         assert all(r["source"] == "claude" for r in rows)
         assert len(rows) == 1
+
+    def test_export_migrates_old_database_without_prompt_hash(self, tmp_env, capsys):
+        conn = sqlite3.connect(str(tmp_env.db_path))
+        conn.executescript("""\
+CREATE TABLE history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    session_id TEXT,
+    project TEXT,
+    prompt TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    UNIQUE(source, timestamp_ms, prompt)
+);
+CREATE VIRTUAL TABLE history_fts USING fts5(
+    prompt, project, content='history', content_rowid='id'
+);
+CREATE TRIGGER history_ai AFTER INSERT ON history BEGIN
+    INSERT INTO history_fts(rowid, prompt, project)
+    VALUES (new.id, new.prompt, new.project);
+END;
+""")
+        conn.execute(
+            "INSERT INTO history (source, session_id, project, prompt, timestamp_ms) "
+            "VALUES ('claude', 's1', '/proj', 'old db export', 1700000001000)"
+        )
+        conn.commit()
+        conn.close()
+
+        args = SimpleNamespace(output=None, format="jsonl", source=None, project=None, since=None)
+        ai_hist.cmd_export(args)
+        captured = capsys.readouterr()
+        row = json.loads(captured.out.strip())
+        assert row["prompt"] == "old db export"
+        assert row["prompt_hash"] is None
 
     def test_export_filter_by_since(self, tmp_env, capsys):
         seed_db(tmp_env, claude_lines=[

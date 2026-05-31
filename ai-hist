@@ -103,18 +103,34 @@ def _resume_cmd(source, session_id, project):
 def _build_fts_query(terms, raw=False):
     """Build an FTS5 query string from a list of terms.
 
-    Auto-detects FTS5 operators (uppercase AND/OR/NOT, leading -, trailing *,
-    pre-quoted phrases) and passes through raw. Otherwise quotes each term for
-    literal matching, which is the safe default for most user input.
+    Auto-detects FTS5 operators (uppercase AND/OR/NOT, trailing *,
+    pre-quoted phrases) and passes through raw. Leading - terms are converted
+    to FTS5 NOT clauses. Otherwise quotes each term for literal matching,
+    which is the safe default for most user input.
     Use raw=True or --fts to force raw FTS5 expression passthrough.
     """
     if raw:
         return " ".join(terms)
     fts_ops = {"AND", "OR", "NOT"}
+    positives = []
+    negatives = []
     for t in terms:
-        if t in fts_ops or t.startswith("-") or t.endswith("*") or (t.startswith('"') and t.endswith('"')):
+        if t in fts_ops or t.endswith("*") or (t.startswith('"') and t.endswith('"')):
             return " ".join(terms)
-    return " ".join(f'"{t}"' for t in terms)
+        if t.startswith("-") and len(t) > 1:
+            negatives.append(t[1:])
+        else:
+            positives.append(t)
+    if negatives and not positives:
+        return '"__ai_hist_no_positive_terms__"'
+    query = " ".join(_quote_fts_term(t) for t in positives)
+    if negatives:
+        query += " NOT " + " NOT ".join(_quote_fts_term(t) for t in negatives)
+    return query
+
+
+def _quote_fts_term(term):
+    return '"' + term.replace('"', '""') + '"'
 
 
 def _row_to_dict(id_, source, session_id, project, prompt, ts_ms):
@@ -1128,6 +1144,7 @@ def cmd_export(args):
     output = getattr(args, "output", None)
 
     conn = sqlite3.connect(str(DB_PATH))
+    init_db(conn)
     rows = _query_export_rows(conn, args)
     conn.close()
 
@@ -1137,6 +1154,13 @@ def cmd_export(args):
 
     if fmt == "sqlite":
         dest = output or "ai-hist-export.db"
+        if Path(dest).resolve() == DB_PATH.resolve():
+            print("Refusing to export SQLite over the active AI_HIST_DB.", file=sys.stderr)
+            sys.exit(1)
+        try:
+            Path(dest).unlink()
+        except FileNotFoundError:
+            pass
         dst = sqlite3.connect(dest)
         init_db(dst)
         inserted = 0
