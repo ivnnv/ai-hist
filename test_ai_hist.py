@@ -117,6 +117,7 @@ class TestParseClaude:
             "session_id": "sess1",
             "project": "/my/project",
             "prompt": "hello world",
+            "prompt_hash": ai_hist._prompt_hash("hello world"),
             "timestamp_ms": 1700000000000,
         }
 
@@ -149,6 +150,7 @@ class TestParseCodex:
             "session_id": "cs1",
             "project": None,
             "prompt": "fix the bug",
+            "prompt_hash": ai_hist._prompt_hash("fix the bug"),
             "timestamp_ms": 1700000000000,
         }
 
@@ -406,7 +408,9 @@ class TestCmdSearch:
         seed_db(tmp_env, claude_lines=[make_claude_entry("hello", 1700000001000)])
         capsys.readouterr()
         args = SimpleNamespace(query=["zzzznonexistent"], source=None, project=None, limit=20)
-        ai_hist.cmd_search(args)
+        with pytest.raises(SystemExit) as exc_info:
+            ai_hist.cmd_search(args)
+        assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "No results." in captured.out
 
@@ -588,7 +592,9 @@ class TestCmdShow:
         seed_db(tmp_env)
         capsys.readouterr()
         args = SimpleNamespace(id=999)
-        ai_hist.cmd_show(args)
+        with pytest.raises(SystemExit) as exc_info:
+            ai_hist.cmd_show(args)
+        assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "No entry with id 999" in captured.out
 
@@ -644,7 +650,9 @@ class TestCmdContext:
         seed_db(tmp_env)
         capsys.readouterr()
         args = SimpleNamespace(id=999, window=5)
-        ai_hist.cmd_context(args)
+        with pytest.raises(SystemExit) as exc_info:
+            ai_hist.cmd_context(args)
+        assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "No entry with id 999" in captured.out
 
@@ -712,7 +720,9 @@ class TestCmdSession:
         seed_db(tmp_env)
         capsys.readouterr()
         args = SimpleNamespace(session_id="nonexistent", full=False)
-        ai_hist.cmd_session(args)
+        with pytest.raises(SystemExit) as exc_info:
+            ai_hist.cmd_session(args)
+        assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "No entries for session nonexistent" in captured.out
 
