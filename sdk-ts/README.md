@@ -35,11 +35,21 @@ const hist = await openAiHist({ fallback: 'error' });
 
 ## MCP server
 
+After the package is published, run the local stdio MCP server with:
+
 ```bash
-npx ai-hist-mcp
+npx -p ai-hist ai-hist-mcp
 ```
 
-The MCP server exposes tools for search, recent history, session lookup, temporal context, evidence packing, and stats. It uses the same data-opening behavior as the SDK: SQLite first, then local JSONL fallback.
+From a local checkout:
+
+```bash
+npm install
+npm run build
+node dist/mcp-server.js
+```
+
+The MCP server exposes tools for search, recent history, session lookup, temporal context, evidence packing, and stats over stdio. It runs on the user's machine and uses the same data-opening behavior as the SDK: SQLite first, then local JSONL fallback.
 
 ## API
 
