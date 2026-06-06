@@ -6,7 +6,7 @@
   "private": false,
   "type": "module",
   "bin": {
-    "ai-hist-mcp": "./bin/ai-hist-mcp.js"
+    "ai-hist-mcp": "bin/ai-hist-mcp.js"
   },
   "files": [
     "bin",
@@ -15,7 +15,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/AgentWorkforce/ai-hist",
+    "url": "git+https://github.com/AgentWorkforce/ai-hist.git",
     "directory": "mcp-package"
   },
   "publishConfig": {
