@@ -7,13 +7,13 @@ The SDK uses `sql.js`, so it has no native build step. It reads the same SQLite 
 ## Install
 
 ```bash
-npm install ai-hist-mcp
+npm install ai-hist
 ```
 
 ## Quick start
 
 ```ts
-import { openAiHist, resumeCommand } from 'ai-hist-mcp';
+import { openAiHist, resumeCommand } from 'ai-hist';
 
 const hist = await openAiHist(); // uses $AI_HIST_DB or ~/.local/share/ai-hist/ai-history.db
 try {

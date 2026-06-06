@@ -1,5 +1,5 @@
 {
-  "name": "ai-hist-mcp",
+  "name": "ai-hist",
   "version": "0.3.0",
   "description": "TypeScript SDK and MCP server for AI coding agent session history — Claude Code, Codex, Cursor, and Agent Relay in one searchable index. Works with or without ai-hist sync via automatic JSONL fallback.",
   "license": "MIT",
