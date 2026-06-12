@@ -1,10 +1,51 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import initSqlJs from 'sql.js';
 import { openAiHist } from './index.js';
+
+test('SDK projectScope restricts all history and trajectory reads', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ai-hist-scope-'));
+  const dbPath = join(root, 'history.db');
+  await writeScopeFixtureDb(dbPath);
+
+  const hist = await openAiHist({ dbPath, projectScope: '/work/app' });
+  try {
+    assert.equal(hist.projectScope, '/work/app');
+    assert.deepEqual(
+      hist.recent({ limit: 10 }).map((entry) => entry.prompt),
+      ['scoped child prompt', 'scoped root prompt'],
+    );
+    assert.deepEqual(
+      hist.recent({ limit: 10, project: '/work/app/pkg' }).map((entry) => entry.prompt),
+      ['scoped child prompt'],
+    );
+    assert.deepEqual(hist.recent({ limit: 10, project: '/work/other' }), []);
+    assert.deepEqual(
+      hist.search('prompt', { limit: 10 }).map((entry) => entry.prompt),
+      ['scoped child prompt', 'scoped root prompt'],
+    );
+    assert.deepEqual(
+      hist.getSession('shared').map((entry) => entry.prompt),
+      ['scoped root prompt', 'scoped child prompt'],
+    );
+    assert.equal(hist.getEntry(3), null);
+    assert.deepEqual(
+      hist.getInTimeWindow(2_000, 2_000).map((entry) => entry.prompt),
+      ['scoped root prompt', 'scoped child prompt'],
+    );
+    assert.equal(hist.stats().total, 2);
+    assert.deepEqual(
+      hist.searchTrajectories('decision', { limit: 10 }).map((entry) => entry.id),
+      ['scoped-run'],
+    );
+  } finally {
+    hist.close();
+  }
+});
 
 test('SDK fallback ingests compacted per-run trajectories from TRAJECTORY_ROOT', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ai-hist-trajectory-'));
@@ -60,11 +101,14 @@ test('SDK fallback ingests compacted per-run trajectories from TRAJECTORY_ROOT',
 });
 
 test('MCP server exposes history and trajectory tools over stdio', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'ai-hist-mcp-'));
-  const child = spawn(process.execPath, [new URL('./mcp-server.js', import.meta.url).pathname], {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'ai-hist-mcp-')));
+  const dbPath = join(root, 'history.db');
+  await writeScopeFixtureDb(dbPath);
+  const child = spawn(process.execPath, [new URL('./mcp-server.js', import.meta.url).pathname, '--project', '.'], {
+    cwd: root,
     env: {
       ...process.env,
-      AI_HIST_DB: join(root, 'missing.db'),
+      AI_HIST_DB: dbPath,
       TRAJECTORY_ROOT: root,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -74,9 +118,11 @@ test('MCP server exposes history and trajectory tools over stdio', async () => {
   child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
 
   try {
-    const tools = await new Promise<Set<string>>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('timed out waiting for MCP tools/list')), 5000);
+    const { tools, stats } = await new Promise<{ tools: Set<string>; stats: { projectScope?: string } }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timed out waiting for MCP responses')), 5000);
       let buffer = '';
+      let tools: Set<string> | null = null;
+      let stats: { projectScope?: string } | null = null;
 
       child.stdout.on('data', (chunk: Buffer) => {
         buffer += chunk.toString('utf8');
@@ -88,7 +134,7 @@ test('MCP server exposes history and trajectory tools over stdio', async () => {
           if (!body) continue;
           const message = JSON.parse(body) as {
             id?: number;
-            result?: { tools?: Array<{ name: string }> };
+            result?: { tools?: Array<{ name: string }>; content?: Array<{ type: string; text?: string }> };
             error?: unknown;
           };
           if (message.error) {
@@ -97,9 +143,15 @@ test('MCP server exposes history and trajectory tools over stdio', async () => {
             return;
           }
           if (message.id === 2) {
+            tools = new Set((message.result?.tools ?? []).map((tool) => tool.name));
+          }
+          if (message.id === 3) {
+            const text = message.result?.content?.find((item) => item.type === 'text')?.text ?? '{}';
+            stats = JSON.parse(text) as { projectScope?: string };
+          }
+          if (tools && stats) {
             clearTimeout(timer);
-            resolve(new Set((message.result?.tools ?? []).map((tool) => tool.name)));
-            return;
+            resolve({ tools, stats });
           }
         }
       });
@@ -136,6 +188,12 @@ test('MCP server exposes history and trajectory tools over stdio', async () => {
         method: 'tools/list',
         params: {},
       });
+      writeJsonRpc(child.stdin, {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'stats', arguments: {} },
+      });
     });
 
     for (const name of [
@@ -149,6 +207,7 @@ test('MCP server exposes history and trajectory tools over stdio', async () => {
     ]) {
       assert.ok(tools.has(name), `missing MCP tool ${name}`);
     }
+    assert.equal(stats.projectScope, root);
   } finally {
     child.kill();
   }
@@ -156,4 +215,91 @@ test('MCP server exposes history and trajectory tools over stdio', async () => {
 
 function writeJsonRpc(stdin: NodeJS.WritableStream, payload: unknown): void {
   stdin.write(`${JSON.stringify(payload)}\n`);
+}
+
+async function writeScopeFixtureDb(dbPath: string): Promise<void> {
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  try {
+    db.run(`CREATE TABLE history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source TEXT NOT NULL,
+      session_id TEXT,
+      project TEXT,
+      prompt TEXT NOT NULL,
+      timestamp_ms INTEGER NOT NULL
+    )`);
+    db.run(`CREATE TABLE trajectories (
+      id TEXT PRIMARY KEY,
+      version INTEGER,
+      persona_id TEXT,
+      project_id TEXT,
+      task_title TEXT,
+      task_description TEXT,
+      status TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      decisions_json TEXT NOT NULL,
+      retrospective_json TEXT NOT NULL,
+      search_text TEXT NOT NULL,
+      path TEXT,
+      updated_ms INTEGER NOT NULL,
+      timestamp_ms INTEGER NOT NULL
+    )`);
+    const insertHistory = db.prepare(
+      'INSERT INTO history (source, session_id, project, prompt, timestamp_ms) VALUES (?, ?, ?, ?, ?)',
+    );
+    const insertTrajectory = db.prepare(
+      `INSERT INTO trajectories
+       (id, version, persona_id, project_id, task_title, task_description, status,
+        started_at, completed_at, decisions_json, retrospective_json, search_text,
+        path, updated_ms, timestamp_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    try {
+      insertHistory.run(['claude', 'shared', '/work/app', 'scoped root prompt', 1_000]);
+      insertHistory.run(['codex', 'shared', '/work/app/pkg', 'scoped child prompt', 2_000]);
+      insertHistory.run(['cursor', 'shared', '/work/other', 'outside prompt', 3_000]);
+      insertTrajectory.run([
+        'scoped-run',
+        1,
+        'planner',
+        'app',
+        'Scoped task',
+        'Scoped decision',
+        'completed',
+        null,
+        null,
+        '[]',
+        '{}',
+        'scoped decision',
+        '/work/app/.trajectories/planner/compacted/scoped-run.json',
+        4_000,
+        4_000,
+      ]);
+      insertTrajectory.run([
+        'outside-run',
+        1,
+        'planner',
+        'other',
+        'Outside task',
+        'Outside decision',
+        'completed',
+        null,
+        null,
+        '[]',
+        '{}',
+        'outside decision',
+        '/work/other/.trajectories/planner/compacted/outside-run.json',
+        5_000,
+        5_000,
+      ]);
+    } finally {
+      insertHistory.free();
+      insertTrajectory.free();
+    }
+    await writeFile(dbPath, Buffer.from(db.export()));
+  } finally {
+    db.close();
+  }
 }

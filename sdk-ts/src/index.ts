@@ -90,6 +90,8 @@ export interface TrajectoryEntry {
 export interface TrajectorySearchOptions {
   /** Default 20. */
   limit?: number;
+  /** Filter to a trajectory projectId or path. */
+  project?: string;
 }
 
 /** Resolve the SQLite path the Python CLI writes to. */
@@ -132,6 +134,11 @@ function ensureTrajectorySchema(db: Database): void {
 export interface OpenOptions {
   /** Override the SQLite path (default: `$AI_HIST_DB` or `~/.local/share/ai-hist/ai-history.db`). */
   dbPath?: string;
+  /**
+   * Restrict all reads to one project directory/path. Exact matches and
+   * child paths are included, so a scope of `/repo` also includes `/repo/pkg`.
+   */
+  projectScope?: string;
   /**
    * What to do when the SQLite DB is missing:
    *   - `'jsonl'` (default): scan local Claude/Codex/Cursor history files
@@ -178,7 +185,7 @@ export async function openAiHist(opts: OpenOptions = {}): Promise<AiHist> {
     // `openAiHist` call. Fast (~30ms on 35K rows).
     db.run('CREATE INDEX IF NOT EXISTS idx_history_session ON history(session_id)');
     db.run('CREATE INDEX IF NOT EXISTS idx_history_timestamp ON history(timestamp_ms DESC)');
-    return new AiHist(db, { kind: 'sqlite', path: dbPath });
+    return new AiHist(db, { kind: 'sqlite', path: dbPath }, { projectScope: opts.projectScope });
   }
 
   if (fallback === 'error') {
@@ -258,7 +265,7 @@ export async function openAiHist(opts: OpenOptions = {}): Promise<AiHist> {
     insertTrajectory.free();
   }
   const scannedPaths = `${LOCAL_SOURCE_PATHS.claude}, ${LOCAL_SOURCE_PATHS.codex}, ${LOCAL_SOURCE_PATHS.cursorRoot}, ${trajectoryRootDescription()}`;
-  return new AiHist(db, { kind: 'jsonl', path: scannedPaths });
+  return new AiHist(db, { kind: 'jsonl', path: scannedPaths }, { projectScope: opts.projectScope });
 }
 
 async function pathExists(p: string): Promise<boolean> {
@@ -343,17 +350,59 @@ function rowToTrajectory(row: RawTrajectoryRow): TrajectoryEntry {
   };
 }
 
-function buildFilters(opts: ListOptions): { sql: string; params: unknown[] } {
+function normalizeProjectScope(project: string | undefined): string | undefined {
+  const trimmed = project?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/[\\/]+$/, '') || trimmed;
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/\|/g, '||').replace(/%/g, '|%').replace(/_/g, '|_');
+}
+
+function scopedPathClause(column: string, project: string): { sql: string; params: unknown[] } {
+  const normalized = normalizeProjectScope(project) ?? project;
+  const escaped = escapeLike(normalized);
+  return {
+    sql: `(${column} = ? OR ${column} LIKE ? ESCAPE '|' OR ${column} LIKE ? ESCAPE '|')`,
+    params: [normalized, `${escaped}/%`, `${escaped}\\%`],
+  };
+}
+
+function scopedTrajectoryClause(project: string): { sql: string; params: unknown[] } {
+  const normalized = normalizeProjectScope(project) ?? project;
+  const pathScope = scopedPathClause('path', normalized);
+  return {
+    sql: `(project_id = ? OR ${pathScope.sql})`,
+    params: [normalized, ...pathScope.params],
+  };
+}
+
+function appendProjectFilter(
+  clauses: string[],
+  params: unknown[],
+  project: string | undefined,
+  projectScope: string | undefined,
+): void {
+  if (projectScope) {
+    const scope = scopedPathClause('project', projectScope);
+    clauses.push(scope.sql);
+    params.push(...scope.params);
+  }
+  if (project) {
+    clauses.push('project = ?');
+    params.push(project);
+  }
+}
+
+function buildFilters(opts: ListOptions, projectScope?: string): { sql: string; params: unknown[] } {
   const clauses: string[] = [];
   const params: unknown[] = [];
   if (opts.source) {
     clauses.push('source = ?');
     params.push(opts.source);
   }
-  if (opts.project) {
-    clauses.push('project = ?');
-    params.push(opts.project);
-  }
+  appendProjectFilter(clauses, params, opts.project, projectScope);
   if (typeof opts.beforeMs === 'number') {
     clauses.push('timestamp_ms < ?');
     params.push(opts.beforeMs);
@@ -381,12 +430,14 @@ function runQuery<T>(db: Database, sql: string, params: unknown[]): T[] {
 export class AiHist {
   private readonly db: Database;
   private readonly _source: OpenSourceInfo;
+  private readonly _projectScope: string | undefined;
   private closed = false;
 
   /** @internal — use `openAiHist(...)` to construct. */
-  constructor(db: Database, source: OpenSourceInfo) {
+  constructor(db: Database, source: OpenSourceInfo, opts: Pick<OpenOptions, 'projectScope'> = {}) {
     this.db = db;
     this._source = source;
+    this._projectScope = normalizeProjectScope(opts.projectScope);
   }
 
   /**
@@ -402,6 +453,11 @@ export class AiHist {
     return this._source.kind;
   }
 
+  /** Server/client-wide project scope applied to every read, if configured. */
+  get projectScope(): string | undefined {
+    return this._projectScope;
+  }
+
   close(): void {
     if (this.closed) return;
     this.db.close();
@@ -411,7 +467,7 @@ export class AiHist {
   /** Most recent prompts, newest first. */
   recent(opts: ListOptions = {}): HistoryEntry[] {
     const limit = opts.limit ?? 50;
-    const { sql, params } = buildFilters(opts);
+    const { sql, params } = buildFilters(opts, this._projectScope);
     return runQuery<RawHistoryRow>(
       this.db,
       `SELECT id, source, session_id, project, prompt, timestamp_ms
@@ -437,7 +493,7 @@ export class AiHist {
    */
   listSessions(opts: ListOptions = {}): SessionSummary[] {
     const limit = opts.limit ?? 50;
-    const { sql, params } = buildFilters(opts);
+    const { sql, params } = buildFilters(opts, this._projectScope);
     const rows = runQuery<{
       session_id: string;
       source: string;
@@ -496,13 +552,16 @@ export class AiHist {
 
   /** All prompts in a session, ordered oldest → newest. */
   getSession(sessionId: string): HistoryEntry[] {
+    const clauses = ['session_id = ?'];
+    const params: unknown[] = [sessionId];
+    appendProjectFilter(clauses, params, undefined, this._projectScope);
     return runQuery<RawHistoryRow>(
       this.db,
       `SELECT id, source, session_id, project, prompt, timestamp_ms
        FROM history
-       WHERE session_id = ?
+       WHERE ${clauses.join(' AND ')}
        ORDER BY timestamp_ms ASC`,
-      [sessionId],
+      params,
     ).map(rowToEntry);
   }
 
@@ -530,10 +589,7 @@ export class AiHist {
       clauses.push('source = ?');
       params.push(opts.source);
     }
-    if (opts.project) {
-      clauses.push('project = ?');
-      params.push(opts.project);
-    }
+    appendProjectFilter(clauses, params, opts.project, this._projectScope);
     if (typeof opts.beforeMs === 'number') {
       clauses.push('timestamp_ms < ?');
       params.push(opts.beforeMs);
@@ -556,20 +612,30 @@ export class AiHist {
     const limit = opts.limit ?? 20;
     const escaped = trimmed.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
     const pattern = `%${escaped}%`;
+    const clauses: string[] = [
+      `(LOWER(search_text) LIKE LOWER(?) ESCAPE '\\'
+          OR LOWER(COALESCE(task_title, '')) LIKE LOWER(?) ESCAPE '\\'
+          OR LOWER(COALESCE(task_description, '')) LIKE LOWER(?) ESCAPE '\\'
+          OR LOWER(COALESCE(persona_id, '')) LIKE LOWER(?) ESCAPE '\\'
+          OR LOWER(COALESCE(project_id, '')) LIKE LOWER(?) ESCAPE '\\')`,
+    ];
+    const params: unknown[] = [pattern, pattern, pattern, pattern, pattern];
+    for (const project of [this._projectScope, opts.project]) {
+      if (!project) continue;
+      const scope = scopedTrajectoryClause(project);
+      clauses.push(scope.sql);
+      params.push(...scope.params);
+    }
     return runQuery<RawTrajectoryRow>(
       this.db,
       `SELECT id, version, persona_id, project_id, task_title, task_description, status,
               started_at, completed_at, decisions_json, retrospective_json, search_text,
               path, updated_ms, timestamp_ms
        FROM trajectories
-       WHERE LOWER(search_text) LIKE LOWER(?) ESCAPE '\\'
-          OR LOWER(COALESCE(task_title, '')) LIKE LOWER(?) ESCAPE '\\'
-          OR LOWER(COALESCE(task_description, '')) LIKE LOWER(?) ESCAPE '\\'
-          OR LOWER(COALESCE(persona_id, '')) LIKE LOWER(?) ESCAPE '\\'
-          OR LOWER(COALESCE(project_id, '')) LIKE LOWER(?) ESCAPE '\\'
+       WHERE ${clauses.join(' AND ')}
        ORDER BY timestamp_ms DESC
        LIMIT ?`,
-      [pattern, pattern, pattern, pattern, pattern, limit],
+      [...params, limit],
     ).map(rowToTrajectory);
   }
 
@@ -580,11 +646,14 @@ export class AiHist {
 
   /** Single entry by id, or `null` if not found. */
   getEntry(id: number): HistoryEntry | null {
+    const clauses = ['id = ?'];
+    const params: unknown[] = [id];
+    appendProjectFilter(clauses, params, undefined, this._projectScope);
     const rows = runQuery<RawHistoryRow>(
       this.db,
       `SELECT id, source, session_id, project, prompt, timestamp_ms
-       FROM history WHERE id = ?`,
-      [id],
+       FROM history WHERE ${clauses.join(' AND ')}`,
+      params,
     );
     return rows.length > 0 ? rowToEntry(rows[0]) : null;
   }
@@ -594,24 +663,32 @@ export class AiHist {
    * timestampMs + windowMs], ordered oldest first. Used by get_context.
    */
   getInTimeWindow(timestampMs: number, windowMs: number): HistoryEntry[] {
+    const clauses = ['timestamp_ms BETWEEN ? AND ?'];
+    const params: unknown[] = [timestampMs - windowMs, timestampMs + windowMs];
+    appendProjectFilter(clauses, params, undefined, this._projectScope);
     return runQuery<RawHistoryRow>(
       this.db,
       `SELECT id, source, session_id, project, prompt, timestamp_ms
        FROM history
-       WHERE timestamp_ms BETWEEN ? AND ?
+       WHERE ${clauses.join(' AND ')}
        ORDER BY timestamp_ms ASC`,
-      [timestampMs - windowMs, timestampMs + windowMs],
+      params,
     ).map(rowToEntry);
   }
 
   /** Counts + date range, mirroring `ai-hist stats`. */
   stats(): Stats {
+    const scopeClauses: string[] = [];
+    const scopeParams: unknown[] = [];
+    appendProjectFilter(scopeClauses, scopeParams, undefined, this._projectScope);
+    const where = scopeClauses.length > 0 ? ` WHERE ${scopeClauses.join(' AND ')}` : '';
+    const andScope = scopeClauses.length > 0 ? ` AND ${scopeClauses.join(' AND ')}` : '';
     const total =
-      runQuery<{ c: number }>(this.db, 'SELECT COUNT(*) AS c FROM history', [])[0]?.c ?? 0;
+      runQuery<{ c: number }>(this.db, `SELECT COUNT(*) AS c FROM history${where}`, scopeParams)[0]?.c ?? 0;
     const bySourceRows = runQuery<{ source: string; c: number }>(
       this.db,
-      'SELECT source, COUNT(*) AS c FROM history GROUP BY source',
-      [],
+      `SELECT source, COUNT(*) AS c FROM history${where} GROUP BY source`,
+      scopeParams,
     );
     const bySource: Partial<Record<Source, number>> = {};
     for (const row of bySourceRows) {
@@ -620,14 +697,14 @@ export class AiHist {
     const byProject = runQuery<{ project: string; c: number }>(
       this.db,
       `SELECT project, COUNT(*) AS c FROM history
-       WHERE project IS NOT NULL AND project != ''
+       WHERE project IS NOT NULL AND project != ''${andScope}
        GROUP BY project ORDER BY c DESC LIMIT 10`,
-      [],
+      scopeParams,
     ).map((row) => ({ project: row.project, count: row.c }));
     const range = runQuery<{ mn: number | null; mx: number | null }>(
       this.db,
-      'SELECT MIN(timestamp_ms) AS mn, MAX(timestamp_ms) AS mx FROM history',
-      [],
+      `SELECT MIN(timestamp_ms) AS mn, MAX(timestamp_ms) AS mx FROM history${where}`,
+      scopeParams,
     )[0];
     return {
       total,

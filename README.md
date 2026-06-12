@@ -173,6 +173,13 @@ npx -y ai-hist-mcp
 
 Tools include `search_history`, `recent_entries`, `get_session`, `get_context`, `stats`, `search_trajectories`, and `why_for_task`.
 
+To scope the MCP server to one project, pass a project scope when launching it. The scope includes exact matches and child paths, so `/path/to/project` also includes sessions recorded under `/path/to/project/packages/api`.
+
+```bash
+npx -y ai-hist-mcp --project .
+npx -y ai-hist-mcp --project /path/to/project
+```
+
 ## Continuous sync (macOS)
 
 Create a launchd plist to sync every 60 seconds:
