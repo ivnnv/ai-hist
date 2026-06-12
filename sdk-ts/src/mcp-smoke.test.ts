@@ -45,6 +45,20 @@ test('SDK projectScope restricts all history and trajectory reads', async () => 
   } finally {
     hist.close();
   }
+
+  const rootScopedHist = await openAiHist({ dbPath, projectScope: '/' });
+  try {
+    assert.deepEqual(
+      rootScopedHist.recent({ limit: 10 }).map((entry) => entry.prompt),
+      ['outside prompt', 'scoped child prompt', 'scoped root prompt'],
+    );
+    assert.deepEqual(
+      rootScopedHist.searchTrajectories('decision', { limit: 10 }).map((entry) => entry.id),
+      ['outside-run', 'scoped-run'],
+    );
+  } finally {
+    rootScopedHist.close();
+  }
 });
 
 test('SDK fallback ingests compacted per-run trajectories from TRAJECTORY_ROOT', async () => {

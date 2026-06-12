@@ -363,9 +363,11 @@ function escapeLike(value: string): string {
 function scopedPathClause(column: string, project: string): { sql: string; params: unknown[] } {
   const normalized = normalizeProjectScope(project) ?? project;
   const escaped = escapeLike(normalized);
+  const slashChildPattern = normalized === '/' ? '/%' : `${escaped}/%`;
+  const backslashChildPattern = normalized === '\\' ? '\\%' : `${escaped}\\%`;
   return {
     sql: `(${column} = ? OR ${column} LIKE ? ESCAPE '|' OR ${column} LIKE ? ESCAPE '|')`,
-    params: [normalized, `${escaped}/%`, `${escaped}\\%`],
+    params: [normalized, slashChildPattern, backslashChildPattern],
   };
 }
 
