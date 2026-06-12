@@ -51,6 +51,13 @@ node dist/mcp-server.js
 
 The MCP server exposes tools for search, recent history, session lookup, temporal context, evidence packing, stats, trajectory search, and task WHY lookup over stdio. It runs on the user's machine and uses the same data-opening behavior as the SDK: SQLite first, then local fallback scanning.
 
+To expose only one project through MCP, pass a project scope when launching the server. Exact project matches and child paths are included.
+
+```bash
+npx -y ai-hist-mcp --project .
+npx -y ai-hist-mcp --project /path/to/project
+```
+
 Contract tools:
 
 - `search_history(query, limit?)`
@@ -66,12 +73,14 @@ Contract tools:
 ```ts
 openAiHist(opts?: {
   dbPath?: string;
+  projectScope?: string;
   fallback?: 'jsonl' | 'error';
 }): Promise<AiHist>
 
 hist.close(): void
 hist.dbPath: string
 hist.sourceKind: 'sqlite' | 'jsonl'
+hist.projectScope: string | undefined
 
 hist.recent(opts?): HistoryEntry[]            // newest prompts first
 hist.listSessions(opts?): SessionSummary[]    // grouped by session_id, last activity DESC

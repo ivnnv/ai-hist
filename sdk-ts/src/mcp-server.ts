@@ -11,6 +11,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { resolve } from "node:path";
 import { z } from "zod";
 import { openAiHist, resumeCommand, type AiHist, type TrajectoryEntry } from "./index.js";
 
@@ -20,9 +21,37 @@ import { openAiHist, resumeCommand, type AiHist, type TrajectoryEntry } from "./
 
 let _histPromise: Promise<AiHist> | null = null;
 
+function normalizeProjectArg(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return resolve(trimmed);
+}
+
+function configuredProjectScope(): string | undefined {
+  for (let i = 2; i < process.argv.length; i++) {
+    const arg = process.argv[i];
+    if (arg === "--project" || arg === "--project-path") {
+      const next = process.argv[i + 1];
+      if (next && !next.startsWith("-")) {
+        const value = normalizeProjectArg(next);
+        if (value) return value;
+        i++;
+      }
+      continue;
+    }
+    for (const prefix of ["--project=", "--project-path="]) {
+      if (arg.startsWith(prefix)) {
+        const value = normalizeProjectArg(arg.slice(prefix.length));
+        if (value) return value;
+      }
+    }
+  }
+  return undefined;
+}
+
 function getHist(): Promise<AiHist> {
   if (!_histPromise) {
-    _histPromise = openAiHist({ fallback: "jsonl" }).catch((err) => {
+    _histPromise = openAiHist({ fallback: "jsonl", projectScope: configuredProjectScope() }).catch((err) => {
       _histPromise = null;
       throw err;
     });
@@ -505,6 +534,7 @@ server.tool(
         }
       }
       lines.push(`\nData source: ${hist.sourceKind} (${hist.dbPath})`);
+      if (hist.projectScope) lines.push(`Project scope: ${hist.projectScope}`);
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${String(err)}` }], isError: true };
@@ -533,6 +563,7 @@ server.tool(
                 lastTimestampMs: s.lastTimestampMs,
                 sourceKind: hist.sourceKind,
                 dbPath: hist.dbPath,
+                projectScope: hist.projectScope,
               },
               null,
               2,
