@@ -643,7 +643,7 @@ server.tool(
       for (let i = 0; i < candidates.length; i++) {
         const c = candidates[i];
         let dt = "unknown";
-        if (Number.isFinite(c.lastActivityMs)) {
+        if (c.lastActivityMs != null && Number.isFinite(c.lastActivityMs)) {
           dt = new Date(c.lastActivityMs).toISOString().slice(0, 16).replace("T", " ");
         }
         lines.push(
