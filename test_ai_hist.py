@@ -2039,7 +2039,7 @@ class TestCmdImport:
 # ---------------------------------------------------------------------------
 
 def make_claude_session_jsonl(project_dir: Path, session_id: str, git_branch: str,
-                               cwd: str, prompts: list, last_assistant: str = None) -> Path:
+                               cwd: str, prompts: list, last_assistant: str | None = None) -> Path:
     """Create a fake Claude per-session JSONL file."""
     project_dir.mkdir(parents=True, exist_ok=True)
     jsonl = project_dir / f"{session_id}.jsonl"

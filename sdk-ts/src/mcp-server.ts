@@ -642,9 +642,10 @@ server.tool(
       const lines: string[] = [`Found ${candidates.length} handoff candidate(s):\n`];
       for (let i = 0; i < candidates.length; i++) {
         const c = candidates[i];
-        const dt = c.lastActivityMs
-          ? new Date(c.lastActivityMs).toISOString().slice(0, 16).replace("T", " ")
-          : "unknown";
+        let dt = "unknown";
+        if (Number.isFinite(c.lastActivityMs)) {
+          dt = new Date(c.lastActivityMs).toISOString().slice(0, 16).replace("T", " ");
+        }
         lines.push(
           `[${i + 1}] ${c.source.toUpperCase()} session  confidence: ${(c.confidence * 100).toFixed(0)}%`,
         );

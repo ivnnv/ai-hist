@@ -320,6 +320,7 @@ export async function openAiHist(opts: OpenOptions = {}): Promise<AiHist> {
         trajectory.projectId,
         trajectory.searchText,
         trajectory.timestampMs,
+        null,
       ]);
     }
     db.exec('COMMIT');
