@@ -2217,3 +2217,57 @@ class TestReadCodexSessionMetaBranch:
         rollout = tmp_path / "rollout-3.jsonl"
         rollout.write_text(json.dumps({"type": "other", "payload": {}}) + "\n")
         assert ai_hist._read_codex_session_meta(rollout) is None
+
+
+class TestBackfillCodexProjects:
+    def _seed(self, tmp_path):
+        conn = sqlite3.connect(str(tmp_path / "test.db"))
+        ai_hist.init_db(conn)
+        for i, ts in enumerate((1000, 2000)):
+            conn.execute(
+                "INSERT INTO history (source, session_id, project, prompt, prompt_hash, timestamp_ms, git_branch) "
+                "VALUES ('codex', 'cx1', NULL, ?, ?, ?, NULL)",
+                (f"p{i}", ai_hist._prompt_hash(f"p{i}"), ts),
+            )
+        conn.commit()
+        return conn
+
+    def test_backfills_columns_and_session(self, tmp_path):
+        conn = self._seed(tmp_path)
+        updated = ai_hist._backfill_codex_projects(conn, {"cx1": "/proj"}, {"cx1": "main"})
+        assert updated == 2  # both rows had NULL project/branch
+        proj, branch = conn.execute(
+            "SELECT project, git_branch FROM history WHERE session_id='cx1' LIMIT 1"
+        ).fetchone()
+        assert (proj, branch) == ("/proj", "main")
+        srow = conn.execute(
+            "SELECT cwd, git_branch, first_activity_ms, last_activity_ms "
+            "FROM sessions WHERE session_id='cx1' AND source='codex'"
+        ).fetchone()
+        conn.close()
+        assert srow == ("/proj", "main", 1000, 2000)
+
+    def test_repeat_call_is_cheap_noop(self, tmp_path):
+        conn = self._seed(tmp_path)
+        ai_hist._backfill_codex_projects(conn, {"cx1": "/proj"}, {"cx1": "main"})
+        # Nothing changed since last sync: no history rows re-written.
+        updated = ai_hist._backfill_codex_projects(conn, {"cx1": "/proj"}, {"cx1": "main"})
+        conn.close()
+        assert updated == 0
+
+    def test_new_activity_bumps_last_activity(self, tmp_path):
+        conn = self._seed(tmp_path)
+        ai_hist._backfill_codex_projects(conn, {"cx1": "/proj"}, {"cx1": "main"})
+        # A newer codex row arrives (already enriched at insert time).
+        conn.execute(
+            "INSERT INTO history (source, session_id, project, prompt, prompt_hash, timestamp_ms, git_branch) "
+            "VALUES ('codex', 'cx1', '/proj', 'p2', ?, 9000, 'main')",
+            (ai_hist._prompt_hash("p2"),),
+        )
+        conn.commit()
+        ai_hist._backfill_codex_projects(conn, {"cx1": "/proj"}, {"cx1": "main"})
+        last = conn.execute(
+            "SELECT last_activity_ms FROM sessions WHERE session_id='cx1' AND source='codex'"
+        ).fetchone()[0]
+        conn.close()
+        assert last == 9000

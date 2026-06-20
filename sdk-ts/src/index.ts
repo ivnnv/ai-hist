@@ -789,6 +789,11 @@ export class AiHist {
     }
 
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    // Over-fetch sessions because many (old or sub-agent) sessions have no
+    // matching `history` prompts and get skipped below. Fetching exactly
+    // `limit` could starve the result to empty even when good candidates exist
+    // just past the cutoff. We stop scanning once we've collected `limit`.
+    const fetchCount = Math.min(Math.max(limit * 5, limit), 100);
     const sessionRows = runQuery<RawSessionRow>(
       this.db,
       `SELECT session_id, source, cwd, git_branch, first_activity_ms, last_activity_ms,
@@ -797,11 +802,12 @@ export class AiHist {
        ${where}
        ORDER BY last_activity_ms DESC
        LIMIT ?`,
-      [...params, limit],
+      [...params, fetchCount],
     );
 
     const candidates: HandoffCandidate[] = [];
     for (const session of sessionRows) {
+      if (candidates.length >= limit) break;
       // Filter by both session_id AND source to prevent cross-source prompt mixing
       // when two CLIs happen to use the same session ID (rare but possible).
       const prompts = runQuery<RawHistoryRow>(
@@ -815,10 +821,13 @@ export class AiHist {
       if (prompts.length === 0) continue;
 
       const filesTouched = extractFilePaths(prompts.map((p) => p.prompt).join('\n'));
-      const goal = prompts[0].prompt.slice(0, 300).replace(/\n/g, ' ');
+      // The first prompt is often injected boilerplate (system-reminder /
+      // command wrappers), especially for relay-driven sessions. Prefer the
+      // first prompt that looks like a real user instruction for the goal.
+      const goalPrompt = prompts.find((p) => !isBoilerplatePrompt(p.prompt)) ?? prompts[0];
+      const goal = goalPrompt.prompt.slice(0, 300).replace(/\n/g, ' ');
       const lastState = prompts[prompts.length - 1].prompt.slice(0, 300).replace(/\n/g, ' ');
 
-      const entry = prompts[0];
       const resume = resumeCommand({
         source: session.source as Source,
         sessionId: session.session_id,
@@ -899,6 +908,21 @@ export class AiHist {
       lastTimestampMs: range?.mx ?? null,
     };
   }
+}
+
+/**
+ * Heuristic: does a prompt look like injected boilerplate rather than a real
+ * user instruction? Relay/agent sessions often open with a system-reminder or
+ * command wrapper that makes a poor "goal" summary.
+ */
+function isBoilerplatePrompt(prompt: string): boolean {
+  const t = prompt.trimStart();
+  return (
+    t.startsWith('<system-reminder') ||
+    t.startsWith('<command-') ||
+    t.startsWith('Caveat:') ||
+    t.startsWith('[Request interrupted')
+  );
 }
 
 /**

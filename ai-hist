@@ -502,50 +502,70 @@ def build_codex_session_map(state: dict) -> tuple:
 
 
 def _backfill_codex_projects(conn: sqlite3.Connection, cwds: dict, branches: dict) -> int:
-    """Set project/git_branch for codex rows whose session_id is mapped."""
-    if not cwds:
+    """Set project/git_branch for codex rows whose session_id is mapped and keep
+    the sessions table in sync.
+
+    Only sessions that still need work are touched — those with a NULL
+    project/branch on some row, not yet recorded in `sessions`, or with newer
+    history activity than `sessions.last_activity_ms`. Fully-synced sessions are
+    skipped, so repeat syncs stay cheap regardless of total history size. The
+    per-session MIN/MAX timestamps come from the same aggregate query.
+    """
+    if not cwds and not branches:
         return 0
-    sids = conn.execute(
-        "SELECT DISTINCT session_id FROM history "
-        "WHERE source='codex' AND session_id IS NOT NULL"
+    rows = conn.execute(
+        """
+        SELECT h.session_id,
+               MIN(h.timestamp_ms), MAX(h.timestamp_ms),
+               SUM(CASE WHEN h.project IS NULL THEN 1 ELSE 0 END),
+               SUM(CASE WHEN h.git_branch IS NULL THEN 1 ELSE 0 END)
+        FROM history h
+        LEFT JOIN sessions s
+          ON s.session_id = h.session_id AND s.source = 'codex'
+        WHERE h.source = 'codex' AND h.session_id IS NOT NULL
+        GROUP BY h.session_id
+        HAVING SUM(CASE WHEN h.project IS NULL THEN 1 ELSE 0 END) > 0
+            OR SUM(CASE WHEN h.git_branch IS NULL THEN 1 ELSE 0 END) > 0
+            OR MAX(s.session_id) IS NULL
+            OR MAX(h.timestamp_ms) > COALESCE(MAX(s.last_activity_ms), -1)
+        """
     ).fetchall()
     updated = 0
-    for (sid,) in sids:
+    dirty = False
+    for sid, first_ts, last_ts, null_proj, null_branch in rows:
         cwd = cwds.get(sid)
         branch = branches.get(sid)
         if not cwd and not branch:
             continue
+        # Only write columns that are actually missing, so rowcount reflects
+        # genuine changes rather than COALESCE no-ops.
         sets = []
         params = []
-        if cwd:
+        if cwd and null_proj:
             sets.append("project = COALESCE(project, ?)")
             params.append(cwd)
-        if branch:
+        if branch and null_branch:
             sets.append("git_branch = COALESCE(git_branch, ?)")
             params.append(branch)
-        params.append(sid)
-        cur = conn.execute(
-            f"UPDATE history SET {', '.join(sets)} WHERE source='codex' AND session_id = ?",
-            params,
-        )
-        updated += cur.rowcount
+        if sets:
+            params.append(sid)
+            cur = conn.execute(
+                f"UPDATE history SET {', '.join(sets)} WHERE source='codex' AND session_id = ?",
+                params,
+            )
+            updated += cur.rowcount
+            dirty = True
         if cwd:
             # Use real timestamps from history so sessions table sorts correctly.
-            ts_row = conn.execute(
-                "SELECT MIN(timestamp_ms), MAX(timestamp_ms) FROM history "
-                "WHERE source='codex' AND session_id = ?",
-                (sid,),
-            ).fetchone()
-            first_ts = ts_row[0] or 0
-            last_ts = ts_row[1] or 0
-            _upsert_session(conn, sid, "codex", cwd, branch, first_ts)
+            _upsert_session(conn, sid, "codex", cwd, branch, first_ts or 0)
             if last_ts:
                 conn.execute(
                     "UPDATE sessions SET last_activity_ms = MAX(COALESCE(last_activity_ms, 0), ?) "
                     "WHERE session_id = ? AND source = 'codex'",
                     (last_ts, sid),
                 )
-    if updated:
+            dirty = True
+    if dirty:
         conn.commit()
     return updated
 
